@@ -16,7 +16,6 @@ function Connection:_parseQuery(sql, params)
 	local i = 1
 	return sql:gsub("%?", function()
 		local param = params[i]
-		assert(not not param, "param #" .. i .. " nil in query")
 
 		i = i + 1
 
@@ -24,6 +23,8 @@ function Connection:_parseQuery(sql, params)
 			return self:_escapeString(param)
 		elseif type(param) == "number" then
 			return tostring(param)
+		elseif param == nil then
+			return "NULL"
 		else
 			error("unknown type given to sql query: " .. type(param))
 		end
