@@ -1,4 +1,6 @@
 pcall(require, "mysqloo")
+if not mysqloo then return end
+
 local Promise = include("promise.lua")
 
 local MysqlOO = {}
@@ -9,6 +11,9 @@ function MysqlOO:query(query)
 	
 	local queryObj = self.db:query(query)
 	function queryObj:onSuccess(data)
+		self.lastInsertID = queryObj:lastInsert()
+		self.lastAffectedRows = queryObj:affectedRows()
+		
 		promise:resolve(data)
 	end
 	function queryObj:onError(err, sql)
@@ -19,28 +24,41 @@ function MysqlOO:query(query)
 	return promise
 end
 
+function MysqlOO:queryLastInsertedId()
+	return self.lastInsertID
+end
+
 function MysqlOO.new(opts)
+	
 	local host, username, password, database, port, socket =
 		opts.host, opts.username, opts.password, opts.database,
 		opts.port, opts.socket
-	local m = mysqloo.connect(host, username, password, database, port, socket)
+	
+	if not host then error("Error: host must be specified when using MysqlOO as the driver") end
+	if not username then error("Error: username must be specified when using MysqlOO as the driver") end
+	if not password then error("Error: password must be specified when using MysqlOO as the driver") end
+		
+	local db = mysqloo.connect(host, username, password, database, port, socket)
 	
 	local connected, connectionMsg
-	m.onConnected = function(db)
+	db.onConnected = function(db)
 		connected = true
 		connectionMsg = db
 	end
-	m.onConnectionFailed = function(db, err)
+	db.onConnectionFailed = function(db, err)
 		connected = false
 		connectionMsg = err
 	end
-	m:connect()
-	m:wait()
+	db:connect()
+	db:wait()
 	if not connected then
 		error("[Metso] Connection failed: " .. tostring(connectionMsg))
 	end
+	
+	db:query("SET NAMES utf8mb4")
+	
 	return setmetatable({
-		db = connectionMsg,
+		db = db,
 		username = username,
 		password = password,
 		database = database
