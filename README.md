@@ -56,12 +56,15 @@ each script having to have its own configuration file.
 
 If you wish you can also create connections directly.
 
+With docker you can create a debugging MySQL database with `docker run -p 3306:3306 --name mysqloo-test -e MYSQL_ROOT_PASSWORD=mysqloo-test -e MYSQL_DATABASE=gmod -d mariadb:latest`
+
 ```lua
 local db = metso.create {
 	driver = "mysqloo",
-	username = "xx",
-	password = "yy",
-	database = "zz"
+	host = "localhost",
+	username = "root",
+	password = "mysqloo-test",
+	database = "gmod"
 }
 ```
 
