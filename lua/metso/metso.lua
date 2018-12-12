@@ -5,6 +5,7 @@ local metso = {}
 
 metso._backends = {
 	mysqloo = include("back_mysqloo.lua"),
+	pg = include("back_pg.lua"),
 	sqlite = include("back_sqlite.lua"),
 }
 
