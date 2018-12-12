@@ -5,7 +5,168 @@ end
 local function __L_load(name)
 	return __L_mods[name]()
 end
-__L_define("toml.lua", function()
+__L_define("connection.lua", function()
+local Connection = {}
+Connection.__index = Connection
+
+--- Escapes string so that it can be added into a SQL query without problems.
+--- This method MUST ALWAYS add quotations around the string.
+function Connection:_escapeString(str)
+	-- TODO per-backend
+	return sql.SQLStr(str)
+end
+
+--- Parses given SQL. In practice this consists of
+--- 1. Replacing placeholders with values from params
+--- 2. Escaping objects that need escaping in parameters
+--- 3. Failing if met with unknown types (fail fast!)
+function Connection:_parseQuery(sql, params)
+	local i = 1
+	return sql:gsub("%?", function()
+		local param = params[i]
+
+		i = i + 1
+
+		if type(param) == "string" then
+			return self:_escapeString(param)
+		elseif type(param) == "number" then
+			return tostring(param)
+		elseif param == nil then
+			return "NULL"
+		else
+			error("unknown type given to sql query: " .. type(param))
+		end
+	end)
+end
+
+--- Submits a query in non-blocking manner.
+--- Returns a promise that contains the rows
+function Connection:query(sql, params)
+	assert(type(sql) == "string", "query sql must be a string")
+
+	params = params or {}
+	assert(type(params) == "table", "query params must be a table")
+
+	local finalSql = self:_parseQuery(sql, params)
+
+	return self._backend:query(finalSql)
+end
+
+function Connection:queryRow(sql, params)
+	return self:query(sql, params):next(function(res)
+		return res[1]
+	end)
+end
+function Connection:queryValue(sql, params)
+    return self:queryRow(sql, params):next(function(row)
+        if not row then
+            return nil
+        end
+        
+        local firstKey = next(row)
+        if firstKey then
+            return row[firstKey]
+        end
+    end)
+end
+
+--- Equal to conn:query(), except the promise has the inserted ID
+--- as the value
+function Connection:insert(sql, params)
+	return self:query(sql, params):next(function()
+		return self._backend:queryLastInsertedId()
+	end)
+end
+
+function Connection.new(backend)
+	assert(not not backend, "backend required")
+	return setmetatable({_backend = backend}, Connection)
+end
+return Connection
+ end)__L_define("metso.lua", function()
+local TOML = __L_load("toml.lua")
+local Connection = __L_load("connection.lua")
+local Promise = __L_load("promise.lua")
+
+local metso = {}
+
+-- Re-export libraries that users might need
+metso.Promise = Promise
+
+metso._backends = {
+	mysqloo = __L_load("back_mysqloo.lua"),
+	pg = __L_load("back_pg.lua"),
+	sqlite = __L_load("back_sqlite.lua"),
+}
+
+-- Creates a database from table that contains connection data (credentials, dbtype) 
+function metso.create(opts)
+	local driver = opts.driver or "sqlite"
+
+	local driverClass = metso._backends[driver]
+	assert(not not driverClass, "driver '" .. driver .. "' not implemented.")
+
+	local driverObj = driverClass.new(opts)
+
+	return Connection.new(driverObj)
+end
+
+function metso._onConfigUpdate()
+end
+
+metso._config = {}
+
+function metso._reloadConfig()
+	local cfg = file.Read("metsodb.toml", "GAME")
+	if not cfg then
+		-- cfg not found, this is ok
+		return
+	end
+
+	local b, parsed = pcall(TOML.parse, cfg)
+	if not b then
+		-- we want to extend default error message with a bit more information
+		error("Parsing metsodb.toml failed: " .. parsed)
+	end
+
+	metso._config = parsed
+	metso._onConfigUpdate()
+end
+metso._reloadConfig()
+
+-- The fallback configurations in case named database is not found
+metso._fallbacks = {}
+
+function metso.provideFallback(name, opts)
+	assert(type(name) == "string", "fallback database name must be a string")
+	assert(type(opts) == "table", "fallback opts must be a table")
+
+	metso._fallbacks[name] = opts
+end
+
+--- Map of connections already established to specific db names
+metso._connCache = {}
+
+--- Gets (or creates) a database connection to given database name.
+--- The name comes from the table name of a database specified in metsodb.toml
+function metso.get(dbname)
+	assert(type(dbname) == "string", "dbname must be a string")
+
+	local cachedConnection = metso._connCache[dbname]
+	if cachedConnection then
+		return cachedConnection
+	end
+
+	-- Search first from configurations, then from fallbacks
+	local dbconfig = metso._config[dbname] or metso._fallbacks[dbname]
+	assert(not not dbconfig, "attempted to get inexistent database '" .. dbname .. "'. Make sure it is properly configured in metsodb.toml")
+
+	local conn = metso.create(dbconfig)
+	metso._connCache[dbname] = conn
+	return conn
+end
+
+return metso end)__L_define("toml.lua", function()
 local TOML = {
 	-- denotes the current supported TOML version
 	version = 0.31,
@@ -563,152 +724,6 @@ end
 
 return TOML
 
- end)__L_define("back_mysqloo.lua", function()
-pcall(require, "mysqloo")
-if not mysqloo then return end
-
-local Promise = __L_load("promise.lua")
-
-local MysqlOO = {}
-MysqlOO.__index = MysqlOO
-
-function MysqlOO:query(query)
-	local promise = Promise.new()
-	
-	local queryObj = self.db:query(query)
-	function queryObj:onSuccess(data)
-		self.lastInsertID = queryObj:lastInsert()
-		self.lastAffectedRows = queryObj:affectedRows()
-		
-		promise:resolve(data)
-	end
-	function queryObj:onError(err, sql)
-		promise:reject(err)
-	end
-	queryObj:start()
-
-	return promise
-end
-
-function MysqlOO:queryLastInsertedId()
-	return self.lastInsertID
-end
-
-function MysqlOO.new(opts)
-	
-	local host, username, password, database, port, socket =
-		opts.host, opts.username, opts.password, opts.database,
-		opts.port, opts.socket
-	
-	if not host then error("Error: host must be specified when using MysqlOO as the driver") end
-	if not username then error("Error: username must be specified when using MysqlOO as the driver") end
-	if not password then error("Error: password must be specified when using MysqlOO as the driver") end
-		
-	local db = mysqloo.connect(host, username, password, database, port, socket)
-	
-	local connected, connectionMsg
-	db.onConnected = function(db)
-		connected = true
-		connectionMsg = db
-	end
-	db.onConnectionFailed = function(db, err)
-		connected = false
-		connectionMsg = err
-	end
-	db:connect()
-	db:wait()
-	if not connected then
-		error("[Metso] Connection failed: " .. tostring(connectionMsg))
-	end
-	
-	db:query("SET NAMES utf8mb4")
-	
-	return setmetatable({
-		db = db,
-		username = username,
-		password = password,
-		database = database
-	}, MysqlOO)
-end
-
-return MysqlOO end)__L_define("connection.lua", function()
-local Connection = {}
-Connection.__index = Connection
-
---- Escapes string so that it can be added into a SQL query without problems.
---- This method MUST ALWAYS add quotations around the string.
-function Connection:_escapeString(str)
-	-- TODO per-backend
-	return sql.SQLStr(str)
-end
-
---- Parses given SQL. In practice this consists of
---- 1. Replacing placeholders with values from params
---- 2. Escaping objects that need escaping in parameters
---- 3. Failing if met with unknown types (fail fast!)
-function Connection:_parseQuery(sql, params)
-	local i = 1
-	return sql:gsub("%?", function()
-		local param = params[i]
-
-		i = i + 1
-
-		if type(param) == "string" then
-			return self:_escapeString(param)
-		elseif type(param) == "number" then
-			return tostring(param)
-		elseif param == nil then
-			return "NULL"
-		else
-			error("unknown type given to sql query: " .. type(param))
-		end
-	end)
-end
-
---- Submits a query in non-blocking manner.
---- Returns a promise that contains the rows
-function Connection:query(sql, params)
-	assert(type(sql) == "string", "query sql must be a string")
-
-	params = params or {}
-	assert(type(params) == "table", "query params must be a table")
-
-	local finalSql = self:_parseQuery(sql, params)
-
-	return self._backend:query(finalSql)
-end
-
-function Connection:queryRow(sql, params)
-	return self:query(sql, params):next(function(res)
-		return res[1]
-	end)
-end
-function Connection:queryValue(sql, params)
-    return self:queryRow(sql, params):next(function(row)
-        if not row then
-            return nil
-        end
-        
-        local firstKey = next(row)
-        if firstKey then
-            return row[firstKey]
-        end
-    end)
-end
-
---- Equal to conn:query(), except the promise has the inserted ID
---- as the value
-function Connection:insert(sql, params)
-	return self:query(sql, params):next(function()
-		return self._backend:queryLastInsertedId()
-	end)
-end
-
-function Connection.new(backend)
-	assert(not not backend, "backend required")
-	return setmetatable({_backend = backend}, Connection)
-end
-return Connection
  end)__L_define("promise.lua", function()
 local M = {}
 
@@ -947,7 +962,131 @@ function M.reject(value)
 	return d
 end
 
-return M end)__L_define("back_sqlite.lua", function()
+return M end)__L_define("back_pg.lua", function()
+pcall(require, "pg")
+if not pg then return end
+
+local Promise = __L_load("promise.lua")
+
+local Postgres = {}
+Postgres.__index = Postgres
+
+function Postgres:query(query)
+	local promise = Promise.new()
+	
+	local queryObj = self.db:query(query)
+	queryObj:on("success", function(data, size)
+		-- self.lastInsertID = ??? TODO
+		self.lastAffectedRows = size
+		
+		promise:resolve(data)
+	end)
+	queryObj:on("error", function(err)
+		promise:reject(err)
+	end)
+	queryObj:run()
+
+	return promise
+end
+
+function Postgres:queryLastInsertedId()
+	return self.lastInsertID
+end
+
+function Postgres.new(opts)
+	
+	local host, username, password, database, port =
+		opts.host, opts.username, opts.password, opts.database,
+		opts.port
+	
+	if not host then error("Error: host must be specified when using Postgres as the driver") end
+	if not username then error("Error: username must be specified when using Postgres as the driver") end
+	if not password then error("Error: password must be specified when using Postgres as the driver") end
+		
+    local db = pg.new_connection()
+    local status, err = db:connect(host, username, password, database, port)
+
+    if not status then
+        error("[Metso] Connection failed: " .. tostring(err))
+    end
+	
+	return setmetatable({
+		db = db,
+		username = username,
+		password = password,
+		database = database
+	}, Postgres)
+end
+
+return Postgres end)__L_define("back_mysqloo.lua", function()
+pcall(require, "mysqloo")
+if not mysqloo then return end
+
+local Promise = __L_load("promise.lua")
+
+local MysqlOO = {}
+MysqlOO.__index = MysqlOO
+
+function MysqlOO:query(query)
+	local promise = Promise.new()
+	
+	local queryObj = self.db:query(query)
+	function queryObj:onSuccess(data)
+		self.lastInsertID = queryObj:lastInsert()
+		self.lastAffectedRows = queryObj:affectedRows()
+		
+		promise:resolve(data)
+	end
+	function queryObj:onError(err, sql)
+		promise:reject(err)
+	end
+	queryObj:start()
+
+	return promise
+end
+
+function MysqlOO:queryLastInsertedId()
+	return self.lastInsertID
+end
+
+function MysqlOO.new(opts)
+	
+	local host, username, password, database, port, socket =
+		opts.host, opts.username, opts.password, opts.database,
+		opts.port, opts.socket
+	
+	if not host then error("Error: host must be specified when using MysqlOO as the driver") end
+	if not username then error("Error: username must be specified when using MysqlOO as the driver") end
+	if not password then error("Error: password must be specified when using MysqlOO as the driver") end
+		
+	local db = mysqloo.connect(host, username, password, database, port, socket)
+	
+	local connected, connectionMsg
+	db.onConnected = function(db)
+		connected = true
+		connectionMsg = db
+	end
+	db.onConnectionFailed = function(db, err)
+		connected = false
+		connectionMsg = err
+	end
+	db:connect()
+	db:wait()
+	if not connected then
+		error("[Metso] Connection failed: " .. tostring(connectionMsg))
+	end
+	
+	db:query("SET NAMES utf8mb4")
+	
+	return setmetatable({
+		db = db,
+		username = username,
+		password = password,
+		database = database
+	}, MysqlOO)
+end
+
+return MysqlOO end)__L_define("back_sqlite.lua", function()
 local Promise = __L_load("promise.lua")
 
 local SQLite = {}
@@ -981,82 +1120,4 @@ function SQLite.new(opts)
 	return setmetatable({}, SQLite)
 end
 
-return SQLite end)__L_define("metso.lua", function()
-local TOML = __L_load("toml.lua")
-local Connection = __L_load("connection.lua")
-
-local metso = {}
-
-metso._backends = {
-	mysqloo = __L_load("back_mysqloo.lua"),
-	sqlite = __L_load("back_sqlite.lua"),
-}
-
--- Creates a database from table that contains connection data (credentials, dbtype) 
-function metso.create(opts)
-	local driver = opts.driver or "sqlite"
-
-	local driverClass = metso._backends[driver]
-	assert(not not driverClass, "driver '" .. driver .. "' not implemented.")
-
-	local driverObj = driverClass.new(opts)
-
-	return Connection.new(driverObj)
-end
-
-function metso._onConfigUpdate()
-end
-
-metso._config = {}
-
-function metso._reloadConfig()
-	local cfg = file.Read("metsodb.toml", "GAME")
-	if not cfg then
-		-- cfg not found, this is ok
-		return
-	end
-
-	local b, parsed = pcall(TOML.parse, cfg)
-	if not b then
-		-- we want to extend default error message with a bit more information
-		error("Parsing metsodb.toml failed: " .. parsed)
-	end
-
-	metso._config = parsed
-	metso._onConfigUpdate()
-end
-metso._reloadConfig()
-
--- The fallback configurations in case named database is not found
-metso._fallbacks = {}
-
-function metso.provideFallback(name, opts)
-	assert(type(name) == "string", "fallback database name must be a string")
-	assert(type(opts) == "table", "fallback opts must be a table")
-
-	metso._fallbacks[name] = opts
-end
-
---- Map of connections already established to specific db names
-metso._connCache = {}
-
---- Gets (or creates) a database connection to given database name.
---- The name comes from the table name of a database specified in metsodb.toml
-function metso.get(dbname)
-	assert(type(dbname) == "string", "dbname must be a string")
-
-	local cachedConnection = metso._connCache[dbname]
-	if cachedConnection then
-		return cachedConnection
-	end
-
-	-- Search first from configurations, then from fallbacks
-	local dbconfig = metso._config[dbname] or metso._fallbacks[dbname]
-	assert(not not dbconfig, "attempted to get inexistent database '" .. dbname .. "'. Make sure it is properly configured in metsodb.toml")
-
-	local conn = metso.create(dbconfig)
-	metso._connCache[dbname] = conn
-	return conn
-end
-
-return metso end)return __L_load("metso.lua")
+return SQLite end)return __L_load("metso.lua")

@@ -4,6 +4,7 @@
 local sourceFiles = {
 	"back_mysqloo.lua",
 	"back_sqlite.lua",
+	"back_pg.lua",
 	"connection.lua",
 	"metso.lua",
 	"promise.lua",
