@@ -1,7 +1,11 @@
 local TOML = include("toml.lua")
 local Connection = include("connection.lua")
+local Promise = include("promise.lua")
 
 local metso = {}
+
+-- Re-export libraries that users might need
+metso.Promise = Promise
 
 metso._backends = {
 	mysqloo = include("back_mysqloo.lua"),
