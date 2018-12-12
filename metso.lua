@@ -83,90 +83,7 @@ function Connection.new(backend)
 	return setmetatable({_backend = backend}, Connection)
 end
 return Connection
- end)__L_define("metso.lua", function()
-local TOML = __L_load("toml.lua")
-local Connection = __L_load("connection.lua")
-local Promise = __L_load("promise.lua")
-
-local metso = {}
-
--- Re-export libraries that users might need
-metso.Promise = Promise
-
-metso._backends = {
-	mysqloo = __L_load("back_mysqloo.lua"),
-	pg = __L_load("back_pg.lua"),
-	sqlite = __L_load("back_sqlite.lua"),
-}
-
--- Creates a database from table that contains connection data (credentials, dbtype) 
-function metso.create(opts)
-	local driver = opts.driver or "sqlite"
-
-	local driverClass = metso._backends[driver]
-	assert(not not driverClass, "driver '" .. driver .. "' not implemented.")
-
-	local driverObj = driverClass.new(opts)
-
-	return Connection.new(driverObj)
-end
-
-function metso._onConfigUpdate()
-end
-
-metso._config = {}
-
-function metso._reloadConfig()
-	local cfg = file.Read("metsodb.toml", "GAME")
-	if not cfg then
-		-- cfg not found, this is ok
-		return
-	end
-
-	local b, parsed = pcall(TOML.parse, cfg)
-	if not b then
-		-- we want to extend default error message with a bit more information
-		error("Parsing metsodb.toml failed: " .. parsed)
-	end
-
-	metso._config = parsed
-	metso._onConfigUpdate()
-end
-metso._reloadConfig()
-
--- The fallback configurations in case named database is not found
-metso._fallbacks = {}
-
-function metso.provideFallback(name, opts)
-	assert(type(name) == "string", "fallback database name must be a string")
-	assert(type(opts) == "table", "fallback opts must be a table")
-
-	metso._fallbacks[name] = opts
-end
-
---- Map of connections already established to specific db names
-metso._connCache = {}
-
---- Gets (or creates) a database connection to given database name.
---- The name comes from the table name of a database specified in metsodb.toml
-function metso.get(dbname)
-	assert(type(dbname) == "string", "dbname must be a string")
-
-	local cachedConnection = metso._connCache[dbname]
-	if cachedConnection then
-		return cachedConnection
-	end
-
-	-- Search first from configurations, then from fallbacks
-	local dbconfig = metso._config[dbname] or metso._fallbacks[dbname]
-	assert(not not dbconfig, "attempted to get inexistent database '" .. dbname .. "'. Make sure it is properly configured in metsodb.toml")
-
-	local conn = metso.create(dbconfig)
-	metso._connCache[dbname] = conn
-	return conn
-end
-
-return metso end)__L_define("toml.lua", function()
+ end)__L_define("toml.lua", function()
 local TOML = {
 	-- denotes the current supported TOML version
 	version = 0.31,
@@ -724,7 +641,90 @@ end
 
 return TOML
 
- end)__L_define("promise.lua", function()
+ end)__L_define("metso.lua", function()
+local TOML = __L_load("toml.lua")
+local Connection = __L_load("connection.lua")
+local Promise = __L_load("promise.lua")
+
+local metso = {}
+
+-- Re-export libraries that users might need
+metso.Promise = Promise
+
+metso._backends = {
+	mysqloo = __L_load("back_mysqloo.lua"),
+	pg = __L_load("back_pg.lua"),
+	sqlite = __L_load("back_sqlite.lua"),
+}
+
+-- Creates a database from table that contains connection data (credentials, dbtype) 
+function metso.create(opts)
+	local driver = opts.driver or "sqlite"
+
+	local driverClass = metso._backends[driver]
+	assert(not not driverClass, "driver '" .. driver .. "' not implemented.")
+
+	local driverObj = driverClass.new(opts)
+
+	return Connection.new(driverObj)
+end
+
+function metso._onConfigUpdate()
+end
+
+metso._config = {}
+
+function metso._reloadConfig()
+	local cfg = file.Read("metsodb.toml", "GAME")
+	if not cfg then
+		-- cfg not found, this is ok
+		return
+	end
+
+	local b, parsed = pcall(TOML.parse, cfg)
+	if not b then
+		-- we want to extend default error message with a bit more information
+		error("Parsing metsodb.toml failed: " .. parsed)
+	end
+
+	metso._config = parsed
+	metso._onConfigUpdate()
+end
+metso._reloadConfig()
+
+-- The fallback configurations in case named database is not found
+metso._fallbacks = {}
+
+function metso.provideFallback(name, opts)
+	assert(type(name) == "string", "fallback database name must be a string")
+	assert(type(opts) == "table", "fallback opts must be a table")
+
+	metso._fallbacks[name] = opts
+end
+
+--- Map of connections already established to specific db names
+metso._connCache = {}
+
+--- Gets (or creates) a database connection to given database name.
+--- The name comes from the table name of a database specified in metsodb.toml
+function metso.get(dbname)
+	assert(type(dbname) == "string", "dbname must be a string")
+
+	local cachedConnection = metso._connCache[dbname]
+	if cachedConnection then
+		return cachedConnection
+	end
+
+	-- Search first from configurations, then from fallbacks
+	local dbconfig = metso._config[dbname] or metso._fallbacks[dbname]
+	assert(not not dbconfig, "attempted to get inexistent database '" .. dbname .. "'. Make sure it is properly configured in metsodb.toml")
+
+	local conn = metso.create(dbconfig)
+	metso._connCache[dbname] = conn
+	return conn
+end
+
+return metso end)__L_define("promise.lua", function()
 local M = {}
 
 local deferred = {}
@@ -1018,7 +1018,41 @@ function Postgres.new(opts)
 	}, Postgres)
 end
 
-return Postgres end)__L_define("back_mysqloo.lua", function()
+return Postgres end)__L_define("back_sqlite.lua", function()
+local Promise = __L_load("promise.lua")
+
+local SQLite = {}
+SQLite.__index = SQLite
+
+function SQLite:query(query)
+	local data = sql.Query(query)
+	local promise = Promise.new()
+
+	if data == false then -- error!
+		local err = sql.LastError()
+		promise:reject(err)
+	elseif data == nil then -- no data
+		promise:resolve({})
+	else
+		promise:resolve(data)
+	end
+
+	return promise
+end
+
+function SQLite:queryLastInsertedId()
+	return tonumber(sql.Query("SELECT last_insert_rowid() id")[1].id)
+end
+
+function SQLite.new(opts)
+	local username, password, database = opts.username, opts.password, opts.database
+	if username or password or database then
+		ErrorNoHalt("Warning: username/password/database specified when using sqlite as the driver")
+	end
+	return setmetatable({}, SQLite)
+end
+
+return SQLite end)__L_define("back_mysqloo.lua", function()
 pcall(require, "mysqloo")
 if not mysqloo then return end
 
@@ -1086,38 +1120,4 @@ function MysqlOO.new(opts)
 	}, MysqlOO)
 end
 
-return MysqlOO end)__L_define("back_sqlite.lua", function()
-local Promise = __L_load("promise.lua")
-
-local SQLite = {}
-SQLite.__index = SQLite
-
-function SQLite:query(query)
-	local data = sql.Query(query)
-	local promise = Promise.new()
-
-	if data == false then -- error!
-		local err = sql.LastError()
-		promise:reject(err)
-	elseif data == nil then -- no data
-		promise:resolve({})
-	else
-		promise:resolve(data)
-	end
-
-	return promise
-end
-
-function SQLite:queryLastInsertedId()
-	return tonumber(sql.Query("SELECT last_insert_rowid() id")[1].id)
-end
-
-function SQLite.new(opts)
-	local username, password, database = opts.username, opts.password, opts.database
-	if username or password or database then
-		ErrorNoHalt("Warning: username/password/database specified when using sqlite as the driver")
-	end
-	return setmetatable({}, SQLite)
-end
-
-return SQLite end)return __L_load("metso.lua")
+return MysqlOO end)return __L_load("metso.lua")

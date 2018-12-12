@@ -1,2 +1,9 @@
 #!/bin/bash
 lua tools/packager.lua
+
+if [ -x "$(command -v luamin)" ]; then
+  luamin -f metso.lua > metso.min.lua
+  echo Minified into metso.min.lua
+else
+  echo Luamin does not exist. Not minifying
+fi
